@@ -1,6 +1,6 @@
 -- Sharing metadata for the manager detail pane.
 return {
-  summary = "Party-wide EXP from the OPTIONS menu: Gen 1 Exp. All style, Gen 5+ Exp. Share style, BALANCED / AVERAGE presets, or CUSTOM 10%-100% sharing with per-slot overrides — one shared-exp line instead of a message per Pokemon. Works on Red/Blue/Yellow and Gold.",
+  summary = "Party-wide EXP from the OPTIONS menu: Gen 1 Exp. All style, Gen 5+ Exp. Share style, BALANCED / AVERAGE presets, or CUSTOM 10%-100% sharing with per-slot overrides — one shared-exp line instead of a message per Pokemon. Works on Red/Blue/Yellow, Gold, and FireRed/LeafGreen/Ruby/Sapphire/Emerald.",
   author = "shanemcgovern",
   tags = { "gameplay", "exp", "qol" },
   differences = {
@@ -14,7 +14,7 @@ return {
       "Shared exp prints ONE \"EXP is shared amongst the party\" line instead of an individual gain message per Pokemon",
     },
     added = {
-      "LEVEL UP JINGLE option in OPTIONS: toggle between LEVEL UP (default fanfare) and ITEM (regular item pickup chime) for faster level-up transitions",
+      "LEVEL UP JINGLE option in OPTIONS: toggle between LEVEL UP (default fanfare) and ITEM (regular item pickup chime) for faster level-up transitions. On Gen 3, ITEM also covers the coin-case and hidden-item pickup jingles",
       "Level-ups, stat boxes and move learning still show for every mon that gained exp",
     },
     known = {

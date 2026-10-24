@@ -31,6 +31,21 @@ do
   run2.release()
 end
 
+-- ---- Gen 3 load gate
+
+do
+  -- same gate as Gen 2: state "loaded" plus zero errors, so a skipped load
+  -- cannot pass silently.  A Gen 3 dataset (Sdk.gen3Data) is required.
+  local run3 = T.sdk.loadMod("mods/exp_share", { data = T.sdk.gen3Data(), generation = 3 })
+  T.eq(run3.mod and run3.mod.state, "loaded",
+    "loads on gen 3: " .. tostring(run3.mod and run3.mod.skipReason))
+  T.eq(#run3.errors, 0, "gen 3 load has no boot errors")
+  T.eq(type(run3.loader.exports.exp_share), "table", "gen 3 exports reachable")
+  T.eq(type(run3.loader.exports.exp_share.modeOf), "function", "gen 3 exports modeOf")
+  T.eq(type(run3.loader.exports.exp_share.cycle), "function", "gen 3 exports cycle")
+  run3.release()
+end
+
 local run = T.sdk.loadMod("mods/exp_share", { data = Data })
 T.eq(#run.errors, 0, "loads clean (" .. tostring(run.errors[1]) .. ")")
 local ex = run.loader.exports.exp_share
@@ -80,8 +95,11 @@ T.eq(game.save.options.expShare, "balanced", "AVERAGE left-cycles to BALANCED")
 T.eq(row.step(game, 1), true, "step again")
 T.eq(game.save.options.expShare, "average", "BALANCED right-cycles to AVERAGE")
 T.eq(row.step(game, 1), true, "step again")
-T.eq(game.save.options.expShare, "off", "AVERAGE cycles back to OFF")
-T.eq(written, 7, "each step persists via writeOptions")
+T.eq(game.save.options.expShare, "custom", "AVERAGE cycles to CUSTOM")
+T.eq(row.value(game), "CUSTOM", "CUSTOM label")
+T.eq(row.step(game, 1), true, "step again")
+T.eq(game.save.options.expShare, "off", "CUSTOM cycles back to OFF")
+T.eq(written, 8, "each step persists via writeOptions")
 
 game.save.options.expShare = "bogus"
 T.eq(ex.modeOf(game), "off", "a garbage value normalizes to OFF")
@@ -1052,5 +1070,476 @@ do
   T.eq(#calls, 2, "gen2: the mod's split ran instead")
 end
 
+do
+  -- Gen 2 GEN 1: an isEgg mon in the party takes no share, the party pass
+  -- goes to the living non-egg mons only
+  local log = {}
+  local monA, monB = { hp = 10 }, { hp = 10 }
+  local egg = { hp = 10, isEgg = true }
+  local battle = {
+    save = { options = { expShare = "gen1" }, party = { monA, monB, egg } },
+    party = { monA, monB, egg },
+    player = monA,
+    emit = function() end,
+  }
+  local ctx = {
+    battle = battle,
+    participants = 1,
+    alive = { monA },
+    applyShare = function(mon, split) log[#log + 1] = { mon = mon, split = split } end,
+  }
+  ex.awardGen1(ctx)
+  T.eq(#log, 3, "gen2 egg gen1: fighter + two party passes, no egg pass")
+  for _, entry in ipairs(log) do
+    T.neq(entry.mon, egg, "gen2 egg gen1: the isEgg mon gets no share")
+  end
+  T.eq(log[1].split, 2, "gen2 egg gen1: fighter split is unchanged")
+  -- the divisor counts only the two non-egg mons: 1 x 2 x 2
+  T.eq(log[2].split, 4, "gen2 egg gen1: divisor leaves the egg out")
+  T.eq(log[3].split, 4, "gen2 egg gen1: the second non-egg mon shares the divisor")
+end
+
+-- ---- Gen 3 jingle
+
+do
+  -- the mod wraps Audio.playFanfare once the Gen 3 audio module is loaded:
+  -- with the ITEM jingle a level-up fanfare plays the item chime instead,
+  -- and the default LEVEL UP leaves every id untouched.  The audio module is
+  -- stubbed before the load and put back after it.
+  local played = {}
+  local audioStub = {
+    playFanfare = function(id) played[#played + 1] = id return true end,
+    role = function(name) if name == "levelUp" then return 257 end end,
+  }
+  local key = "src.core.game3.audio"
+  local prev = package.loaded[key]
+  package.loaded[key] = audioStub
+  local run4 = T.sdk.loadMod("mods/exp_share", { data = T.sdk.gen3Data(), generation = 3 })
+  package.loaded[key] = prev
+  local ex4 = run4.loader.exports.exp_share
+  local game = { save = { options = {} } }
+
+  -- default LEVEL UP: the fanfare id passes through unchanged
+  audioStub.playFanfare("MUS_LEVEL_UP")
+  T.eq(played[1], "MUS_LEVEL_UP", "gen3 jingle: LEVEL UP leaves the fanfare alone")
+
+  -- ITEM: a level-up fanfare (by name or by the role id) becomes the item chime
+  ex4.cycleJingle(game)
+  T.eq(game.save.options.expShareJingle, "item", "gen3 jingle: cycles to ITEM")
+  audioStub.playFanfare("MUS_LEVEL_UP")
+  T.eq(played[2], "MUS_OBTAIN_ITEM", "gen3 jingle: ITEM swaps MUS_LEVEL_UP")
+  audioStub.playFanfare(257)
+  T.eq(played[3], "MUS_OBTAIN_ITEM", "gen3 jingle: ITEM swaps the levelUp role id")
+  audioStub.playFanfare("MUS_WILD_VICTORY")
+  T.eq(played[4], "MUS_WILD_VICTORY", "gen3 jingle: other fanfares pass through")
+
+  -- back to LEVEL UP: the swap stops
+  ex4.cycleJingle(game)
+  T.eq(game.save.options.expShareJingle, "level_up", "gen3 jingle: cycles back to LEVEL UP")
+  audioStub.playFanfare("MUS_LEVEL_UP")
+  T.eq(played[5], "MUS_LEVEL_UP", "gen3 jingle: LEVEL UP again leaves the fanfare alone")
+  run4.release()
+end
+
+do
+  -- a second load on the same audio module must redirect through the newest
+  -- api: the wrapper is installed once, but it reads Audio._expShareApi, which
+  -- every load refreshes
+  local played = {}
+  local audioStub = {
+    playFanfare = function(id) played[#played + 1] = id return true end,
+    role = function(name) if name == "levelUp" then return 257 end end,
+  }
+  local key = "src.core.game3.audio"
+  local prev = package.loaded[key]
+  package.loaded[key] = audioStub
+  local run5 = T.sdk.loadMod("mods/exp_share", { data = T.sdk.gen3Data(), generation = 3 })
+  run5.release()
+  local run6 = T.sdk.loadMod("mods/exp_share", { data = T.sdk.gen3Data(), generation = 3 })
+  package.loaded[key] = prev
+  local ex6 = run6.loader.exports.exp_share
+  local game = { save = { options = {} } }
+  ex6.cycleJingle(game)
+  T.eq(game.save.options.expShareJingle, "item", "gen3 reload: the second load sets ITEM")
+  audioStub.playFanfare("MUS_LEVEL_UP")
+  T.eq(played[1], "MUS_OBTAIN_ITEM", "gen3 reload: the wrapper uses the newest api")
+  run6.release()
+end
+
+-- the Gen 3 blocks run on a generation=3 load: the mod's require of the Gen 3
+-- battle UI is a cross-generation denial on a Gen 1 load
+local run3 = T.sdk.loadMod("mods/exp_share", { data = T.sdk.gen3Data(), generation = 3 })
+local ex3 = run3.loader.exports.exp_share
+T.eq(type(ex3.awardGen1), "function", "gen 3 exports awardGen1 for the Gen 3 blocks")
+T.eq(type(ex3.awardGen5), "function", "gen 3 exports awardGen5 for the Gen 3 blocks")
+
+-- Gen 3's battle is the raw state table: playerParty plus session, with the
+-- options on session.engineOptions.  The share line goes to the battle text
+-- box (Ui.push), so the Ui module is stubbed for the duration of a case.
+local function withGen3Ui(fn)
+  local key = "src.core.game3.battle.ui"
+  local prev = package.loaded[key]
+  local pushed = {}
+  package.loaded[key] = { push = function(text) pushed[#pushed + 1] = text end }
+  local ok, err = pcall(fn, pushed)
+  package.loaded[key] = prev
+  if not ok then error(err, 0) end
+end
+
+local function gen3Battle(mode, party)
+  return {
+    playerParty = party,
+    session = { engineOptions = { expShare = mode } },
+  }
+end
+
+do
+  -- GEN 1 on Gen 3: one fighter of three, the two bench mons take the
+  -- party pass, and the share line lands in the text box
+  withGen3Ui(function(pushed)
+    local log = {}
+    local monA, monB, monC = { hp = 10 }, { hp = 10 }, { hp = 10 }
+    local battle = gen3Battle("gen1", { monA, monB, monC })
+    local ctx = {
+      battle = battle,
+      participants = 1,
+      alive = { monA },
+      applyShare = function(mon, split, announce)
+        log[#log + 1] = { kind = "share", mon = mon, split = split,
+                          announce = announce }
+      end,
+    }
+    ex3.awardGen1(ctx)
+    T.eq(log[1].mon, monA, "gen3 gen1: the fighter gets the first share")
+    T.eq(log[1].split, 2, "gen3 gen1: fighter split = participants(1) x 2")
+    T.eq(log[1].announce, true, "gen3 gen1: the fighter's own gain is announced")
+    T.eq(#pushed, 1, "gen3 gen1: one share line in the text box")
+    T.eq(pushed[1], "EXP is shared\namongst the party!",
+      "gen3 gen1: the single shared-exp line")
+    T.eq(log[2].mon, monA, "gen3 gen1: the fighter is in the party pass too")
+    T.eq(log[2].split, 6, "gen3 gen1: party split = participants(1) x party(3) x 2")
+    T.eq(log[3].mon, monB, "gen3 gen1: bench mon B gets the party pass")
+    T.eq(log[3].split, 6, "gen3 gen1: bench B shares the same divisor")
+    T.eq(log[4].mon, monC, "gen3 gen1: bench mon C gets the party pass")
+    T.eq(log[4].split, 6, "gen3 gen1: bench C shares the same divisor")
+    T.eq(#log, 4, "gen3 gen1: fighter share + party pass for all three mons")
+  end)
+end
+
+do
+  -- GEN 5+ on Gen 3: the fighter keeps the full amount, the bench gets half
+  -- a fighter's share, and fainted bench mons are skipped
+  withGen3Ui(function(pushed)
+    local log = {}
+    local monA, monB, dead = { hp = 10 }, { hp = 10 }, { hp = 0 }
+    local battle = gen3Battle("gen5", { monA, monB, dead })
+    local ctx = {
+      battle = battle,
+      participants = 1,
+      alive = { monA },
+      applyShare = function(mon, split, announce)
+        log[#log + 1] = { kind = "share", mon = mon, split = split,
+                          announce = announce }
+      end,
+    }
+    ex3.awardGen5(ctx)
+    T.eq(log[1].mon, monA, "gen3 gen5: the fighter keeps the full amount")
+    T.eq(log[1].split, 1, "gen3 gen5: fighter split = participants(1)")
+    T.eq(log[1].announce, true, "gen3 gen5: the fighter's own gain is announced")
+    T.eq(#pushed, 1, "gen3 gen5: one share line in the text box")
+    T.eq(log[2].mon, monB, "gen3 gen5: the living bench mon is paid")
+    T.eq(log[2].split, 2, "gen3 gen5: bench gets half a fighter's share")
+    T.eq(log[2].announce, nil, "gen3 gen5: bench gains are not announced per mon")
+    T.eq(#log, 2, "gen3 gen5: the fainted mon is skipped")
+  end)
+end
+
+do
+  -- a SPECIES_EGG on the bench is not a battler: it takes no share in GEN 5+
+  -- or GEN 1, and the party count used for the GEN 1 divisor is unchanged
+  local log = {}
+  local monA, monB = { hp = 10 }, { hp = 10 }
+  local egg = { hp = 10, species = 412 }
+  local battle = gen3Battle("gen5", { monA, monB, egg })
+  local ctx = {
+    battle = battle,
+    participants = 1,
+    alive = { monA },
+    applyShare = function(mon, split) log[#log + 1] = { mon = mon, split = split } end,
+  }
+  ex3.awardGen5(ctx)
+  T.eq(#log, 2, "gen3 egg gen5: only the fighter and the bench mon are paid")
+  for _, entry in ipairs(log) do
+    T.neq(entry.mon, egg, "gen3 egg gen5: the egg gets no share")
+  end
+
+  log = {}
+  battle = gen3Battle("gen1", { monA, monB, egg })
+  ctx.battle = battle
+  ex3.awardGen1(ctx)
+  T.eq(#log, 3, "gen3 egg gen1: fighter + two party passes, no egg pass")
+  for _, entry in ipairs(log) do
+    T.neq(entry.mon, egg, "gen3 egg gen1: the egg gets no share")
+  end
+  T.eq(log[1].split, 2, "gen3 egg gen1: fighter split is unchanged")
+  -- the divisor counts only the two non-egg mons: 1 x 2 x 2
+  T.eq(log[2].split, 4, "gen3 egg gen1: divisor leaves the egg out")
+  T.eq(log[3].split, 4, "gen3 egg gen1: the second non-egg mon shares the divisor")
+end
+
+do
+  -- AVERAGE on Gen 3 measures the level cap over the non-egg party: the egg
+  -- (level 3) would drag the average to 8 and lock monB out, but without it
+  -- the cap is floor((12 + 9) / 2) = 10 and monB at 9 still gains
+  local log = {}
+  local monA = { hp = 10, level = 12 }
+  local monB = { hp = 10, level = 9 }
+  local egg = { hp = 10, level = 3, species = 412 }
+  local battle = gen3Battle("average", { monA, monB, egg })
+  local ctx = {
+    battle = battle,
+    participants = 1,
+    alive = { monA },
+    applyShare = function(mon, split) log[#log + 1] = { mon = mon, split = split } end,
+  }
+  ex3.awardAverage(ctx)
+  T.eq(#log, 2, "gen3 egg average: fighter + the below-average bench mon")
+  T.eq(log[1].mon, monA, "gen3 egg average: the fighter keeps the full amount")
+  T.eq(log[2].mon, monB, "gen3 egg average: monB is under the non-egg average")
+  T.eq(log[2].split, 2, "gen3 egg average: bench gets half a fighter's share")
+  for _, entry in ipairs(log) do
+    T.neq(entry.mon, egg, "gen3 egg average: the egg gets no share")
+  end
+end
+
+-- ---- Gen 3 hook wiring
+
+do
+  -- OFF on Gen 3 defers to the vanilla split and shows no share line
+  withGen3Ui(function(pushed)
+    local sawVanilla = false
+    local battle = gen3Battle("off", { { hp = 10 } })
+    Runtime.call("battle.exp_award", function() sawVanilla = true end,
+      { battle = battle })
+    T.eq(sawVanilla, true, "gen3 OFF calls through to the vanilla split")
+    T.eq(#pushed, 0, "gen3 OFF pushes no share line")
+  end)
+end
+
+do
+  -- GEN 5+ on Gen 3 replaces the vanilla split and reaches the hook through
+  -- the Gen 3 shape (no save, game or party on the battle)
+  withGen3Ui(function(pushed)
+    local sawVanilla = false
+    local calls = {}
+    local monA, monB = { hp = 10 }, { hp = 10 }
+    local battle = gen3Battle("gen5", { monA, monB })
+    local ctx = {
+      battle = battle,
+      participants = 1,
+      alive = { monA },
+      applyShare = function(mon, split) calls[#calls + 1] = split end,
+    }
+    Runtime.call("battle.exp_award", function() sawVanilla = true end, ctx)
+    T.eq(sawVanilla, false, "gen3: GEN 5+ replaces the vanilla split")
+    T.eq(#calls, 2, "gen3: the mod's split ran instead")
+    T.eq(#pushed, 1, "gen3: the share line went through Ui.push")
+  end)
+end
+
+-- ---- Gen 3 title-screen row
+
+do
+  -- before any save exists the title-screen OPTIONS menu hands the row a game
+  -- with no save and the root options table; the row must still step it and
+  -- persist through writeOptions
+  local written = 0
+  local game = {
+    options = { expShare = "off" },
+    writeOptions = function(self)
+      assert(type(self) == "table" and self.options ~= nil,
+             "writeOptions must be called with a colon")
+      written = written + 1
+    end,
+  }
+  local row = findRow(game)
+  T.neq(row, nil, "gen3 title: the EXP SHARE row joins the options menu")
+  T.eq(row.value(game), "OFF", "gen3 title: defaults to OFF")
+  T.eq(row.step(game, 1), true, "gen3 title: stepping right works with no save")
+  T.eq(game.options.expShare, "gen1", "gen3 title: OFF cycles to GEN 1 on game.options")
+  T.eq(row.value(game), "GEN 1", "gen3 title: value follows game.options")
+  T.eq(written, 1, "gen3 title: the step calls writeOptions")
+end
+
+-- ---- Gen 3 share message
+
+do
+  -- the share line goes through the Gen 3 battle UI (Ui.push) and does not
+  -- throw when the battle has no sayNext or emit
+  withGen3Ui(function(pushed)
+    local monA, monB = { hp = 10 }, { hp = 10 }
+    local battle = gen3Battle("gen5", { monA, monB })
+    local ok, err = pcall(ex3.awardGen5, {
+      battle = battle,
+      participants = 1,
+      alive = { monA },
+      applyShare = function() end,
+    })
+    T.eq(ok, true, "gen3 share message does not throw: " .. tostring(err))
+    T.eq(pushed[1], "EXP is shared\namongst the party!",
+      "gen3 share message goes through Ui.push")
+  end)
+end
+
+-- ---- Gen 3 OPTIONS menu
+
+do
+  -- the live Gen 3 option_rows module, the same instance the mod wrapped at
+  -- load, so its Rows.GROUPS carries the mod's group.battle members.  The ROM
+  -- text cache is not in the test checkout, so the RomText lookups the native
+  -- rows make are swapped on the live rom_text table for the section and put
+  -- back after.  Only native row ids are asserted, not their labels.
+  local RomText = require("src.core.game3.rom_text")
+  local Rows = package.loaded["src.ui.game3.option_rows"]
+  T.neq(Rows, nil, "gen3 menu: option_rows is loaded by the Gen 3 load")
+  local stubbed = {
+    plain = function(key) return key end,
+    box = function(key) return key end,
+    ascii = function(key) return key end,
+    at = function(name, i) return name .. "[" .. tostring(i) .. "]" end,
+    count = function() return 6 end,
+    has = function() return true end,
+    key = function(name, i) return name .. "[" .. tostring(i) .. "]" end,
+  }
+  local saved = {}
+  for name, fn in pairs(stubbed) do
+    saved[name] = RomText[name]
+    RomText[name] = fn
+  end
+
+  local MOD_IDS = {
+    exp_share = true, exp_share_percent_slot = true, exp_share_percent = true,
+    exp_share_single = true, exp_share_jingle = true,
+  }
+
+  local function byId(rows, id)
+    for _, row in ipairs(rows) do
+      if row.id == id then return row end
+    end
+    return nil
+  end
+
+  -- the OPTIONS screen's ctx: game may be nil on the title screen, options is
+  -- the engine table, and the BATTLE OPTIONS page is opened through activate
+  local function screenCtx(game, engine)
+    return { game = game, session = {}, options = engine }
+  end
+
+  -- returns the flat list, the top-level list, and the BATTLE OPTIONS page
+  local function openScreen(ctx)
+    local flat = Rows.build(ctx)
+    local page
+    local top = Rows.group(flat, function(_, members) page = members end)
+    local battle = byId(top, "group.battle")
+    if battle then battle.activate(ctx) end
+    return flat, top, page
+  end
+
+  local function idsOf(rows)
+    local out = {}
+    for i, row in ipairs(rows or {}) do out[i] = tostring(row.id) end
+    return table.concat(out, ",")
+  end
+
+  do
+    -- the mod's rows live on the BATTLE OPTIONS page, after the native battle
+    -- rows, and nowhere on the top-level list
+    local engine = {}
+    local game = { save = { options = engine }, writeOptions = function() end }
+    local ctx = screenCtx(game, engine)
+    local _, top, page = openScreen(ctx)
+
+    local loose = {}
+    for _, row in ipairs(top) do
+      if MOD_IDS[row.id] then loose[#loose + 1] = row.id end
+    end
+    T.eq(#loose, 0, "gen3 menu: no EXP SHARE row on the top-level list")
+    T.neq(byId(top, "group.battle"), nil, "gen3 menu: BATTLE OPTIONS group row is on the top level")
+    T.neq(page, nil, "gen3 menu: BATTLE OPTIONS activate opens a page")
+    T.eq(idsOf(page),
+      "battleScene,battleStyle,exp_share,exp_share_percent_slot,exp_share_percent,"
+        .. "exp_share_single,exp_share_jingle",
+      "gen3 menu: BATTLE OPTIONS page lists the native rows, then the mod rows in order")
+    T.eq(byId(page, "exp_share").label, "EXP SHARE", "gen3 menu: EXP SHARE label")
+    T.eq(byId(page, "exp_share_percent_slot").label, "PERCENT SLOT", "gen3 menu: PERCENT SLOT label")
+    T.eq(byId(page, "exp_share_percent").label, "PERCENT", "gen3 menu: PERCENT label")
+    T.eq(byId(page, "exp_share_single").label, "SINGLE EXP SHARE", "gen3 menu: SINGLE EXP SHARE label")
+    T.eq(byId(page, "exp_share_jingle").label, "LEVEL UP JINGLE", "gen3 menu: LEVEL UP JINGLE label")
+
+    -- the EXP SHARE row on the page steps the engine table through game.save
+    local expRow = byId(page, "exp_share")
+    T.eq(expRow.value(ctx), "OFF", "gen3 menu: EXP SHARE reads OFF by default")
+    T.eq(expRow.step(ctx, 1), true, "gen3 menu: EXP SHARE steps on the OPTIONS page")
+    T.eq(engine.expShare, "gen1", "gen3 menu: the step stores GEN 1 in the engine options")
+    T.eq(expRow.value(ctx), "GEN 1", "gen3 menu: the EXP SHARE value label follows")
+  end
+
+  do
+    -- PERCENT SLOT and PERCENT read "--" and refuse to step outside CUSTOM
+    local engine = {}
+    local game = { save = { options = engine }, writeOptions = function() end }
+    local ctx = screenCtx(game, engine)
+    local _, _, page = openScreen(ctx)
+    local slotRow = byId(page, "exp_share_percent_slot")
+    local pctRow = byId(page, "exp_share_percent")
+    local expRow = byId(page, "exp_share")
+
+    T.eq(slotRow.value(ctx), "--", "gen3 menu: PERCENT SLOT reads -- when OFF")
+    T.eq(pctRow.value(ctx), "--", "gen3 menu: PERCENT reads -- when OFF")
+    T.eq(slotRow.step(ctx, 1), false, "gen3 menu: PERCENT SLOT does not step when OFF")
+    T.eq(pctRow.step(ctx, 1), false, "gen3 menu: PERCENT does not step when OFF")
+    T.eq(engine.expSharePercent, nil, "gen3 menu: refused PERCENT step stores nothing")
+
+    -- walk EXP SHARE up the ladder through the real row to CUSTOM
+    for _, want in ipairs({ "gen1", "gen5", "balanced", "average", "custom" }) do
+      T.eq(expRow.step(ctx, 1), true, "gen3 menu: EXP SHARE steps toward " .. want)
+      T.eq(engine.expShare, want, "gen3 menu: EXP SHARE reaches " .. want)
+    end
+    T.eq(pctRow.value(ctx), "100%", "gen3 menu: PERCENT reads 100% in CUSTOM")
+    T.eq(pctRow.step(ctx, 1), true, "gen3 menu: PERCENT steps in CUSTOM")
+    T.eq(engine.expSharePercent, 10, "gen3 menu: the step stores the next percent")
+    T.eq(pctRow.value(ctx), "10%", "gen3 menu: the PERCENT label changes after the step")
+  end
+
+  do
+    -- ctx.game is nil on the title screen: every row must still read and step
+    -- without throwing, and the mod's rows stay inert
+    local engine = {}
+    local ctx = screenCtx(nil, engine)
+    local ok, err = pcall(function()
+      local _, _, page = openScreen(ctx)
+      T.neq(page, nil, "gen3 title menu: the BATTLE OPTIONS page opens")
+      for _, id in ipairs({ "exp_share", "exp_share_percent_slot", "exp_share_percent",
+                            "exp_share_single", "exp_share_jingle" }) do
+        local row = byId(page, id)
+        T.neq(row, nil, "gen3 title menu: " .. id .. " is listed")
+        row.value(ctx)
+        row.step(ctx, 1)
+      end
+    end)
+    T.eq(ok, true, "gen3 title menu: rows read and step with no game: " .. tostring(err))
+
+    local _, _, page = openScreen(ctx)
+    T.eq(byId(page, "exp_share_percent").value(ctx), "--",
+      "gen3 title menu: PERCENT reads -- with no game")
+    T.eq(byId(page, "exp_share_percent").step(ctx, 1), false,
+      "gen3 title menu: PERCENT does not step with no game")
+    T.eq(byId(page, "exp_share").step(ctx, 1), false,
+      "gen3 title menu: EXP SHARE has no save to write, so it does not step")
+  end
+  for name, fn in pairs(saved) do RomText[name] = fn end
+end
+
+run3.release()
 run.release()
 T.finish("exp_share")
