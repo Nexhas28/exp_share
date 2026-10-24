@@ -5,6 +5,38 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.11] - 2026-10-24
+
+### Added
+
+- Gen 3 support (FireRed / LeafGreen / Ruby / Sapphire / Emerald). The manifest
+  now declares `"games": ["gen1", "gen2", "gen3"]`. The exp award reads the
+  party from the battle's `playerParty` and the options from
+  `battle.session.engineOptions`, the same table the save stores. GEN 1,
+  GEN 5+, BALANCED, AVERAGE, CUSTOM and SINGLE EXP SHARE use the same formulas
+  as Gen 1 and Gen 2. Ruby, Sapphire and Emerald share the `gen3` token;
+  tests ran headless on FireRed data only.
+- The Gen 3 shared-exp line goes through the battle text box. It shows before
+  the fighters' own gain lines; Gen 2 shows it after them.
+- Gen 3 OPTIONS opened from the title screen, before any save is loaded, read
+  and write the same options block as the in-game menu.
+- Gen 3: the EXP SHARE rows live on OPTIONS > BATTLE OPTIONS; PERCENT rows are
+  always listed there and read `--` unless CUSTOM.
+- LEVEL UP JINGLE on Gen 3: ITEM replaces every `MUS_LEVEL_UP` fanfare with the
+  item pickup song (`MUS_OBTAIN_ITEM`). That includes level-ups and the coin
+  case and hidden-item pickup jingles, which reuse the level-up fanfare.
+
+### Fixed
+
+- Eggs no longer receive the bench share on Gen 3.
+- The LEVEL UP JINGLE choice is now read from saved options when no game has
+  loaded yet. Before this fix it was ignored until `game.ready` on every
+  generation.
+- The Gen 3 share line and jingle wrap use `require` instead of
+  `package.loaded`, which is empty inside the mod's sandbox.
+- After a same-process reload of the mod, the Gen 3 jingle wrap uses the
+  latest copy of the mod's settings.
+
 ## [0.1.10] - 2026-08-21
 
 ### Fixed

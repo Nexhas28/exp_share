@@ -1,11 +1,11 @@
 {
   "id": "exp_share",
   "name": "Exp Share",
-  "version": "0.1.10",
+  "version": "0.1.11",
   "api": 2,
   "entry": "main.lua",
   "profile": "content",
-  "games": ["gen1", "gen2"],
+  "games": ["gen1", "gen2", "gen3"],
   "game_version": ">=0.0.0-dev <1.0.0",
   "category": "GAMEPLAY",
   "priority": 100,

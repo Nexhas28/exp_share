@@ -29,7 +29,12 @@ end
 function mod.hooks:wrap(name, fn)
   wrappers[name] = fn
 end
-local entry = assert(loadfile("main.lua"))()
+-- resolve main.lua beside this test's own tests/ folder, so the run works from
+-- the mod root, from an engine root that has the mod symlinked, and under the
+-- engine's runner, where the cwd is not the mod
+local here = debug.getinfo(1, "S").source:gsub("^@", "")
+local modRoot = (here:gsub("tests/custom_test%.lua$", ""))
+local entry = assert(loadfile(modRoot .. "main.lua"))()
 entry(mod)
 local ex = mod.exports
 local game = {

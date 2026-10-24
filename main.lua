@@ -43,12 +43,34 @@ local api = {
   lastOptions = nil,
 }
 
--- the save behind a battle ctx on either generation: Gen 1's BattleState
+-- Gen 3's battle is the raw state table: it has no save, game or party,
+-- only playerParty and the session.  The session's engineOptions is the same
+-- table as game.save.options (save_schema_firered.lua:359), so it is the
+-- options block the rows write to.
+local function isGen3(battle)
+  return battle.playerParty ~= nil and battle.session ~= nil
+end
+
+-- the save behind a battle ctx on any generation: Gen 1's BattleState
 -- carries the live game (battle.game.save); Gen 2's Battle carries the save
 -- itself (battle.save) with battle.party aliasing save.party.
+-- eggs sit in the party as ordinary mons; Gen 3's Pokemon.isEgg
+-- (pokemon.lua:1463) checks the flag or SPECIES_EGG.  Gen 1 / Gen 2 deny the
+-- require, so there the check is always false.
+local function isEgg(mon)
+  if mon.isEgg == true or mon.egg == true then return true end
+  local okPokemon, Pokemon = pcall(require, "src.core.game3.pokemon")
+  if okPokemon and type(Pokemon) == "table" and Pokemon.isEgg then
+    return Pokemon.isEgg(mon) and true or false
+  end
+  return false
+end
+
 local function saveOf(battle)
   if not battle then return nil end
-  return battle.save or (battle.game and battle.game.save)
+  local save = battle.save or (battle.game and battle.game.save)
+  if save or not isGen3(battle) then return save end
+  return { party = battle.playerParty, options = battle.session.engineOptions }
 end
 
 local function partyOf(battle)
@@ -84,19 +106,35 @@ local function jingleFromOptions(options)
   return "level_up"
 end
 
--- the share line: Gen 1's BattleState:sayNext, Gen 2's Battle:emit
+-- the share line: Gen 1's BattleState:sayNext, Gen 2's Battle:emit, Gen 3's
+-- battle text box (Ui.push, the same queue exp_seq pushes its messages to)
 local function sayShare(battle, text)
   if not battle then return end
   if battle.sayNext then
     battle:sayNext(text)
-  else
+  elseif battle.emit then
     battle:emit({ kind = "message", text = text })
+  else
+    local okUi, Ui = pcall(require, "src.core.game3.battle.ui")
+    if okUi and Ui and Ui.push then Ui.push(text) end
   end
+end
+
+-- the options block behind an OPTIONS row's game.  Gen 1 / Gen 2 keep it at
+-- game.save.options.  Gen 3's title-screen menu opens before any save exists,
+-- so with no save it reads the root options table on the game itself
+-- (Game3.options, which writeOptions persists).
+local function gameOptions(game)
+  if type(game) ~= "table" then return nil end
+  local options = game.save and game.save.options
+  if options then return options end
+  if game.save == nil and type(game.options) == "table" then return game.options end
+  return nil
 end
 
 -- normalized mode: nil / garbage -> "off"
 function api.modeOf(game)
-  return modeFromOptions(game and game.save and game.save.options)
+  return modeFromOptions(gameOptions(game))
 end
 
 -- the row's step body: LEFT/RIGHT cycle OFF -> GEN 1 -> GEN 5+ ->
@@ -104,7 +142,7 @@ end
 -- launcher's stub games), so the row stays inert there like every other
 -- options row.
 function api.cycle(game, dir)
-  local options = game and game.save and game.save.options
+  local options = gameOptions(game)
   if not options then return nil end
   -- modeOf normalizes, so the ladder position is a direct lookup; the
   -- modulo is the same wrap the engine's own ladder rows use
@@ -126,13 +164,13 @@ end
 -- SINGLE EXP SHARE: nil (missing / "all" / garbage) means the shared exp
 -- reaches the whole party; a number 1-6 scopes it to that party slot.
 function api.slotOf(game)
-  return slotFromOptions(game and game.save and game.save.options)
+  return slotFromOptions(gameOptions(game))
 end
 
 -- the row's step body: LEFT/RIGHT cycle ALL -> 1 -> 2 -> ... -> 6 -> ALL.
 -- Returns nil when there is no save, like api.cycle.
 function api.cycleSlot(game, dir)
-  local options = game and game.save and game.save.options
+  local options = gameOptions(game)
   if not options then return nil end
   local i = SLOT_INDEX[options.expShareSingle] or 1
   local nextSlot = SLOT_ORDER[((i - 1 + (dir or 1)) % #SLOT_ORDER) + 1]
@@ -146,7 +184,7 @@ function api.cycleSlot(game, dir)
 end
 
 function api.slotLabel(game)
-  local options = game and game.save and game.save.options
+  local options = gameOptions(game)
   return SLOT_LABELS[options and options.expShareSingle] or "ALL"
 end
 
@@ -191,16 +229,16 @@ end
 -- party-slot override when it names a slot.  Missing/invalid saved values
 -- fall back to the safe 100% default.
 function api.percentSlotOf(game)
-  return percentSlotFromOptions(game and game.save and game.save.options)
+  return percentSlotFromOptions(gameOptions(game))
 end
 
 function api.percentForSlot(game, slot)
-  local options = game and game.save and game.save.options
+  local options = gameOptions(game)
   return percentForOptions(options, tonumber(slot))
 end
 
 function api.percentOf(game)
-  local options = game and game.save and game.save.options
+  local options = gameOptions(game)
   return percentForOptions(options, percentSlotFromOptions(options))
 end
 
@@ -209,7 +247,7 @@ function api.percentLabel(game)
 end
 
 function api.percentSlotLabel(game)
-  local options = game and game.save and game.save.options
+  local options = gameOptions(game)
   local slot = percentSlotFromOptions(options)
   return slot and tostring(slot) or "ALL"
 end
@@ -217,7 +255,7 @@ end
 -- Cycle the global percentage or the selected slot's percentage, depending
 -- on PERCENT SLOT.  Each value is an integer multiple of ten.
 function api.cyclePercent(game, dir)
-  local options = game and game.save and game.save.options
+  local options = gameOptions(game)
   if not options then return nil end
   local current = api.percentOf(game)
   local i = PERCENT_INDEX[current] or #PERCENT_ORDER
@@ -233,7 +271,7 @@ function api.cyclePercent(game, dir)
 end
 
 function api.cyclePercentSlot(game, dir)
-  local options = game and game.save and game.save.options
+  local options = gameOptions(game)
   if not options then return nil end
   local current = tostring(options.expSharePercentSlot or "all")
   local i = SLOT_INDEX[current] or 1
@@ -256,14 +294,17 @@ end
 -- LEVEL UP JINGLE: "level_up" (default fanfare) vs "item" (short item pickup chime).
 function api.jingleOf(game)
   local options = optionsFrom(game) or api.lastOptions
-  if not options and package.loaded["src.core.SaveData"] then
-    pcall(function() options = require("src.core.SaveData").loadOptions() end)
+  if not options then
+    local okSave, SaveData = pcall(require, "src.core.SaveData")
+    if okSave and type(SaveData) == "table" and SaveData.loadOptions then
+      pcall(function() options = SaveData.loadOptions() end)
+    end
   end
   return jingleFromOptions(options)
 end
 
 function api.cycleJingle(game, dir)
-  local options = game and game.save and game.save.options
+  local options = gameOptions(game)
   if not options then return nil end
   local i = JINGLE_INDEX[api.jingleOf(game)] or 1
   local nextJingle = JINGLE_ORDER[((i - 1 + (dir or 1)) % #JINGLE_ORDER) + 1]
@@ -309,7 +350,7 @@ function api.awardGen1(ctx)
   -- when SINGLE EXP SHARE names one (an out-of-range slot means nobody)
   local recipients = {}
   for _, mon in ipairs(party) do
-    if mon.hp > 0 and (not slot or mon == single) then
+    if mon.hp > 0 and not isEgg(mon) and (not slot or mon == single) then
       recipients[#recipients + 1] = mon
     end
   end
@@ -318,16 +359,23 @@ function api.awardGen1(ctx)
     if not fought[mon] then line = true break end
   end
   if line then sayShare(battle, SHARE_TEXT) end
+  -- the divisor counts only mons that can receive exp: eggs are left out
+  local partyCount = 0
+  for _, mon in ipairs(party) do
+    if not isEgg(mon) then partyCount = partyCount + 1 end
+  end
   for _, mon in ipairs(recipients) do
-    ctx.applyShare(mon, p * #party * 2, nil)
+    ctx.applyShare(mon, p * partyCount * 2, nil)
   end
 end
 
 -- the shared GEN 5+ split: fighters keep the full exp split between
 -- them; every alive bench mon that passes `gate` gets half a fighter's
 -- share unless `benchSplit` supplies a custom divisor.  The bench gains
--- are silent -- one share line replaces the per-mon messages, and it lands
--- after the fighters' own gains but before the bench level-ups.
+-- are silent -- one share line replaces the per-mon messages.  On Gen 1 and
+-- Gen 2 it lands after the fighters' own gains and before the bench level-ups;
+-- on Gen 3 the award hook runs before the exp sequence queues the fighters'
+-- gain lines, so the share line shows before them.
 local function awardModern(ctx, gate, benchSplit)
   local battle = ctx.battle
   local party = partyOf(battle)
@@ -338,7 +386,7 @@ local function awardModern(ctx, gate, benchSplit)
   for _, mon in ipairs(ctx.alive) do fought[mon] = true end
   local bench = {}
   for _, mon in ipairs(party) do
-    if mon.hp > 0 and not fought[mon] and (not gate or gate(mon))
+    if mon.hp > 0 and not isEgg(mon) and not fought[mon] and (not gate or gate(mon))
         and (not slot or mon == single) then
       bench[#bench + 1] = mon
     end
@@ -376,16 +424,19 @@ end
 
 -- AVERAGE: the GEN 5+ split with the gate set to the party's average
 -- level -- a bench mon only gains exp while it is below that average
--- (whole party, fainted included), so the bench trails the party's
+-- (whole party minus eggs, fainted included), so the bench trails the party's
 -- middle instead of the lead fighter.
 function api.awardAverage(ctx)
   local battle = ctx.battle
   local party = partyOf(battle)
-  local total = 0
+  local total, count = 0, 0
   for _, mon in ipairs(party) do
-    total = total + (mon.level or 1)
+    if not isEgg(mon) then
+      total = total + (mon.level or 1)
+      count = count + 1
+    end
   end
-  local capLevel = #party > 0 and math.floor(total / #party) or 100
+  local capLevel = count > 0 and math.floor(total / count) or 100
   return awardModern(ctx, function(mon)
     return mon.level < capLevel
   end)
@@ -415,22 +466,28 @@ local CUSTOM_ROW_IDS = {
   exp_share_percent = true,
 }
 
-local function customOptionRows()
+-- gated (GEN 3): the rows are listed in every mode, because the page's row
+-- list is fixed when the menu builds.  Outside CUSTOM they read "--" and do
+-- not step.  A nil game (the title-screen menu before any save) is not CUSTOM.
+local function customOptionRows(gated)
+  local function live(g)
+    return not gated or modeFromOptions(gameOptions(g)) == "custom"
+  end
   return {
     {
       id = "exp_share_percent_slot",
       label = "PERCENT SLOT",
-      value = function(g) return api.percentSlotLabel(g) end,
+      value = function(g) return live(g) and api.percentSlotLabel(g) or "--" end,
       step = function(g, dir)
-        return api.cyclePercentSlot(g, dir) ~= nil
+        return live(g) and api.cyclePercentSlot(g, dir) ~= nil
       end,
     },
     {
       id = "exp_share_percent",
       label = "PERCENT",
-      value = function(g) return api.percentLabel(g) end,
+      value = function(g) return live(g) and api.percentLabel(g) or "--" end,
       step = function(g, dir)
-        return api.cyclePercent(g, dir) ~= nil
+        return live(g) and api.cyclePercent(g, dir) ~= nil
       end,
     },
   }
@@ -440,7 +497,7 @@ end
 -- Keep that list synchronized when the user changes EXP SHARE to/from CUSTOM
 -- instead of waiting for the menu to be reopened.
 local function syncCustomOptionRows(rows, game)
-  local custom = modeFromOptions(game and game.save and game.save.options) == "custom"
+  local custom = modeFromOptions(gameOptions(game)) == "custom"
   local seen = {}
   for i = #rows, 1, -1 do
     local id = rows[i].id
@@ -458,6 +515,69 @@ local function syncCustomOptionRows(rows, game)
     if not seen[row.id] then
       table.insert(rows, insertAt, row)
       insertAt = insertAt + 1
+    end
+  end
+end
+
+-- GEN 3 LEVEL UP JINGLE: the level-up fanfare goes through Audio.playFanfare
+-- (battle/exp_seq.lua, field.lua).  The audio module is required with pcall:
+-- on Gen 1 / Gen 2 that require is denied, so the wrap silently does nothing.
+-- It is retried at load, at game.ready and from the battle.exp_award hook,
+-- and is idempotent once installed.
+local GEN3_ITEM_JINGLE = "MUS_OBTAIN_ITEM"
+
+local function wrapGen3Fanfare()
+  local okAudio, Audio = pcall(require, "src.core.game3.audio")
+  if not okAudio or type(Audio) ~= "table" then return end
+  -- a same-process reload brings a new api; the wrap reads the latest one
+  Audio._expShareApi = api
+  if Audio._expShareWrapped then return end
+  Audio._expShareWrapped = true
+  local rawPlayFanfare = Audio.playFanfare
+  Audio.playFanfare = function(id, ...)
+    if (Audio._expShareApi or api).shouldRedirectJingle() then
+      if id == "MUS_LEVEL_UP" or id == (Audio.role("levelUp") or 257) then
+        id = GEN3_ITEM_JINGLE
+      end
+    end
+    return rawPlayFanfare(id, ...)
+  end
+end
+
+-- GEN 3 OPTIONS: the engine's option_rows bridge.  The gate is the mod's boot
+-- generation (mod.generation, fixed by the loader), not the require: a plain
+-- test runner can load that engine module on any generation.  Only then is
+-- the module required, and the pcall covers a denied require.
+local function gen3OptionRows(mod)
+  if mod.generation ~= 3 then return nil end
+  local okRows, Rows = pcall(require, "src.ui.game3.option_rows")
+  if okRows and type(Rows) == "table" and type(Rows.GROUPS) == "table" then
+    return Rows
+  end
+  return nil
+end
+
+-- Rows.group files a row by its id, so the EXP SHARE ids join the BATTLE OPTIONS
+-- page's members.  Without this they land at the top level after MODS.
+-- Idempotent: an id already in the group is not added again.
+local GEN3_BATTLE_ROW_IDS = {
+  "exp_share", "exp_share_percent_slot", "exp_share_percent",
+  "exp_share_single", "exp_share_jingle",
+}
+
+local function wrapGen3OptionsGroup(mod)
+  local Rows = gen3OptionRows(mod)
+  if not Rows then return end
+  for _, group in ipairs(Rows.GROUPS) do
+    if group.id == "group.battle" then
+      local present = {}
+      for _, id in ipairs(group.members) do present[id] = true end
+      for _, id in ipairs(GEN3_BATTLE_ROW_IDS) do
+        if not present[id] then
+          group.members[#group.members + 1] = id
+          present[id] = true
+        end
+      end
     end
   end
 end
@@ -617,30 +737,39 @@ return function(mod)
     end
   end
 
+  wrapGen3Fanfare()
+  wrapGen3OptionsGroup(mod)
   mod.events:on("game.ready", function(ev)
-    if ev and ev.game and ev.game.save and ev.game.save.options then
-      api.lastOptions = ev.game.save.options
-    end
+    local options = ev and gameOptions(ev.game)
+    if options then api.lastOptions = options end
+    wrapGen3Fanfare()
+    wrapGen3OptionsGroup(mod)
   end)
 
   -- the OPTIONS row; next() first keeps every other mod's rows
   mod.hooks:wrap("ui.options.rows", function(next, game, rows)
-    if game and game.save and game.save.options then
-      api.lastOptions = game.save.options
-    end
+    local options = gameOptions(game)
+    if options then api.lastOptions = options end
     local out = next(game, rows)
     if type(out) ~= "table" then return out end
+    -- Gen 3 copies the returned rows once, so the list is fixed by now:
+    -- its percent rows are always listed, and syncCustomOptionRows is skipped
+    local gen3 = gen3OptionRows(mod) ~= nil
     out[#out + 1] = {
       id = "exp_share",
       label = "EXP SHARE",
       value = function(g) return api.labelOf(g) end,
       step = function(g, dir)
         local nextMode = api.cycle(g, dir)
-        if nextMode ~= nil then syncCustomOptionRows(out, g) end
+        if nextMode ~= nil and not gen3 then syncCustomOptionRows(out, g) end
         return nextMode ~= nil
       end,
     }
-    syncCustomOptionRows(out, game)
+    if gen3 then
+      for _, row in ipairs(customOptionRows(true)) do out[#out + 1] = row end
+    else
+      syncCustomOptionRows(out, game)
+    end
     out[#out + 1] = {
       id = "exp_share_single",
       label = "SINGLE EXP SHARE",
@@ -667,6 +796,8 @@ return function(mod)
   -- active; in OFF mode we defer through nextFn, which falls through to
   -- Crystal's wrap so Crystal still owns EXP when exp_share is disabled.
   mod.hooks:wrap("battle.exp_award", function(nextFn, ctx)
+    -- idempotent: a no-op once wrapped, and a retry if game.ready missed it
+    wrapGen3Fanfare()
     local opts = optionsOf(ctx.battle)
     if opts then api.lastOptions = opts end
     local mode = modeFromOptions(opts)
